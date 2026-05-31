@@ -24,7 +24,9 @@ class QuoteInputRead(QuoteInputBase, ORMModel):
 
 class QuoteFeeItemBase(BaseModel):
     fee_stage: str
+    fee_item_code: str | None = None
     fee_item: str
+    billing_basis: str | None = None
     currency: str
     official_fee: Decimal = Decimal("0.00")
     foreign_agent_fee: Decimal = Decimal("0.00")

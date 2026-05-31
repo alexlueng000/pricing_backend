@@ -16,7 +16,10 @@ def create_quote(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return QuoteService(db).create_quote(payload, consultant_id=current_user.id)
+    try:
+        return QuoteService(db).create_quote(payload, consultant_id=current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("", response_model=list[QuoteRead])

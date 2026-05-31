@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import BigInteger, Date, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Date, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -27,6 +27,7 @@ class PricingRule(TimestampMixin, Base):
     filing_route: Mapped[str] = mapped_column(String(100), nullable=False)
     entity_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     fee_stage: Mapped[str] = mapped_column(String(100), nullable=False)
+    fee_item_code: Mapped[str | None] = mapped_column(ForeignKey("fee_items.fee_item_code"), nullable=True)
     fee_item: Mapped[str] = mapped_column(String(255), nullable=False)
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
     official_fee_formula: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -42,3 +43,4 @@ class PricingRule(TimestampMixin, Base):
     quote_fee_items: Mapped[list["QuoteFeeItem"]] = relationship(
         back_populates="pricing_rule",
     )
+    fee_item_definition: Mapped["FeeItemDefinition | None"] = relationship(back_populates="pricing_rules")

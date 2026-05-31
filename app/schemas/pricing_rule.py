@@ -11,7 +11,8 @@ class PricingRuleBase(BaseModel):
     filing_route: str
     entity_type: str | None = None
     fee_stage: str
-    fee_item: str
+    fee_item_code: str | None = None
+    fee_item: str = ""
     currency: str
     official_fee_formula: str | None = None
     foreign_agent_fee_formula: str | None = None

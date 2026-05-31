@@ -10,10 +10,17 @@ from app.repositories.pricing_rules import PricingRuleRepository
 from app.repositories.quotes import QuoteFeeItemRepository, QuoteRepository
 from app.schemas.quote import QuoteCreate
 from app.services.calculation import FormulaError, SafeFormulaEvaluator, money, parse_input_value
+from app.services.design_pricing import DesignPricingConfigService
 
 
 QUOTE_STATUSES = {"draft", "generated", "sent_to_customer", "voided"}
 CNY_CURRENCIES = {"CNY", "RMB", "人民币"}
+DESIGN_EXAMINATION_CATEGORY_DEFAULT = "default_substantive"
+DESIGN_EXAMINATION_CATEGORY_VALUES = {
+    "substantive_examination",
+    "partial_examination",
+    DESIGN_EXAMINATION_CATEGORY_DEFAULT,
+}
 INAPPLICABLE_PATENT_TYPES = {
     ("美国", "实用新型"): "美国无实用新型制度，该国家不生成实用新型费用。",
     ("欧洲", "实用新型"): "欧洲无实用新型制度，该地区不生成实用新型费用。",
@@ -27,6 +34,7 @@ class QuoteService:
         self.fee_items = QuoteFeeItemRepository(db)
         self.pricing_rules = PricingRuleRepository(db)
         self.exchange_rates = ExchangeRateRepository(db)
+        self.design_pricing = DesignPricingConfigService(db)
 
     def create_quote(self, payload: QuoteCreate, *, consultant_id: int) -> Quote:
         quote = Quote(
@@ -51,13 +59,14 @@ class QuoteService:
             special_tax_approved_at=payload.special_tax_approved_at,
             special_tax_remark=payload.special_tax_remark,
         )
+        inputs = self._normalize_inputs_for_quote(payload)
         quote.inputs = [
             QuoteInput(
                 field_key=item.field_key,
                 field_label=item.field_label,
                 field_value=item.field_value,
             )
-            for item in payload.inputs
+            for item in inputs
         ]
         self.quotes.add(quote)
         self.db.commit()
@@ -89,7 +98,7 @@ class QuoteService:
         if quote is None:
             return None
 
-        input_map = {item.field_key: item.field_value for item in quote.inputs}
+        input_map = self._input_map_with_defaults(quote)
         context = self._build_calculation_context(quote, input_map)
         entity_type = input_map.get("entity_size") or input_map.get("entity_type")
         items: list[QuoteFeeItem] = []
@@ -102,7 +111,9 @@ class QuoteService:
                         quote_id=quote.id,
                         pricing_rule_id=None,
                         fee_stage="申请阶段",
+                        fee_item_code=None,
                         fee_item=f"{country_region} - {quote.patent_type}不可申请/不适用",
+                        billing_basis=f"{country_region}/{quote.patent_type}",
                         currency="N/A",
                         official_fee=Decimal("0.00"),
                         foreign_agent_fee=Decimal("0.00"),
@@ -118,6 +129,16 @@ class QuoteService:
                 **context,
                 "country_region": country_region,
             }
+            design_item = self._calculate_design_config_item(
+                quote=quote,
+                country_region=country_region,
+                input_map=input_map,
+            )
+            if design_item is not None:
+                total_cny += design_item.subtotal_cny
+                items.append(design_item)
+                continue
+
             rules = self.pricing_rules.find_active_rules(
                 country_region=country_region,
                 patent_type=quote.patent_type,
@@ -152,7 +173,9 @@ class QuoteService:
                         quote_id=quote.id,
                         pricing_rule_id=rule.id,
                         fee_stage=rule.fee_stage,
-                        fee_item=f"{country_region} - {rule.fee_item}",
+                        fee_item_code=rule.fee_item_code,
+                        fee_item=self._fee_item_display_name(rule),
+                        billing_basis=self._render_billing_basis(rule, country_context),
                         currency=rule.currency,
                         official_fee=official_fee,
                         foreign_agent_fee=foreign_agent_fee,
@@ -210,6 +233,113 @@ class QuoteService:
         for key, value in input_map.items():
             context[key] = parse_input_value(value)
         return context
+
+    def _normalize_inputs_for_quote(self, payload: QuoteCreate):
+        inputs = list(payload.inputs)
+        examination_category = next(
+            (item for item in inputs if item.field_key == "examination_category"),
+            None,
+        )
+        if examination_category is None:
+            return inputs
+
+        if examination_category.field_value not in DESIGN_EXAMINATION_CATEGORY_VALUES:
+            raise ValueError("外观设计审查类别不合法")
+        return inputs
+
+    def _input_map_with_defaults(self, quote: Quote) -> dict[str, str | None]:
+        input_map = {item.field_key: item.field_value for item in quote.inputs}
+        if quote.patent_type == "外观设计":
+            input_map.setdefault(
+                "examination_category",
+                DESIGN_EXAMINATION_CATEGORY_DEFAULT,
+            )
+        return input_map
+
+    def _calculate_design_config_item(
+        self,
+        *,
+        quote: Quote,
+        country_region: str,
+        input_map: dict[str, str | None],
+    ) -> QuoteFeeItem | None:
+        if quote.patent_type != "外观设计":
+            return None
+
+        config = self.design_pricing.find_config(
+            country_region=country_region,
+            business_type="design",
+            examination_category=input_map.get("examination_category"),
+        )
+        if config is None:
+            return None
+
+        design_count = self._design_count(input_map)
+        total_price = money(
+            self.design_pricing.calculate_total_price(
+                config=config,
+                design_count=design_count,
+            )
+        )
+        remark = None
+        if design_count > 1 and config.multiple_design_warning:
+            remark = config.multiple_design_warning
+        if config.examination_category_label:
+            remark = f"{remark} {config.examination_category_label}" if remark else config.examination_category_label
+
+        return QuoteFeeItem(
+            quote_id=quote.id,
+            pricing_rule_id=None,
+            fee_stage="申请阶段",
+            fee_item_code=None,
+            fee_item=f"{country_region} - 外观设计基础报价",
+            billing_basis=f"设计项数：{design_count}项",
+            currency="CNY",
+            official_fee=Decimal("0.00"),
+            foreign_agent_fee=Decimal("0.00"),
+            local_agent_fee_cny=total_price,
+            tax_cny=Decimal("0.00"),
+            subtotal_cny=total_price,
+            remark=remark,
+        )
+
+    @staticmethod
+    def _design_count(input_map: dict[str, str | None]) -> int:
+        for field_key in ("design_count", "design_items"):
+            value = parse_input_value(input_map.get(field_key))
+            try:
+                count = int(Decimal(str(value)))
+            except Exception:
+                continue
+            if count > 0:
+                return count
+        return 1
+
+    @staticmethod
+    def _fee_item_display_name(rule) -> str:
+        definition = rule.fee_item_definition
+        if definition is None:
+            return rule.fee_item
+        return definition.display_name_template or definition.fee_item_name
+
+    def _render_billing_basis(self, rule, context: dict[str, object]) -> str | None:
+        definition = rule.fee_item_definition
+        if definition is None or not definition.billing_basis_template:
+            return None
+
+        return re.sub(
+            r"\{([A-Za-z_][A-Za-z0-9_]*)\}",
+            lambda match: self._format_template_value(context.get(match.group(1))),
+            definition.billing_basis_template,
+        )
+
+    @staticmethod
+    def _format_template_value(value: object) -> str:
+        if isinstance(value, Decimal):
+            return str(int(value)) if value == value.to_integral_value() else str(value)
+        if value is None:
+            return ""
+        return str(value)
 
     @staticmethod
     def _split_country_regions(country_region: str) -> list[str]:

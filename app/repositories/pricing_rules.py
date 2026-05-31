@@ -1,7 +1,7 @@
 from datetime import date
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.pricing_rule import PricingRule
 from app.repositories.base import BaseRepository
@@ -22,6 +22,7 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
     ) -> list[PricingRule]:
         stmt = (
             select(PricingRule)
+            .options(selectinload(PricingRule.fee_item_definition))
             .where(
                 PricingRule.country_region == country_region,
                 PricingRule.patent_type == patent_type,
@@ -32,7 +33,15 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
             )
             .order_by(PricingRule.fee_stage, PricingRule.id)
         )
-        return list(self.db.scalars(stmt))
+        rules = list(self.db.scalars(stmt))
+        return sorted(
+            rules,
+            key=lambda rule: (
+                rule.fee_stage,
+                rule.fee_item_definition.display_order if rule.fee_item_definition else 999999,
+                rule.id,
+            ),
+        )
 
     def list_active(
         self,
@@ -43,7 +52,11 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
         currency: str | None = None,
         status: str = "active",
     ) -> list[PricingRule]:
-        stmt = select(PricingRule).where(PricingRule.status == status)
+        stmt = (
+            select(PricingRule)
+            .options(selectinload(PricingRule.fee_item_definition))
+            .where(PricingRule.status == status)
+        )
         if country_region:
             stmt = stmt.where(PricingRule.country_region == country_region)
         if patent_type:

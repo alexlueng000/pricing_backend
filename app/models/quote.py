@@ -103,7 +103,9 @@ class QuoteFeeItem(Base):
         nullable=True,
     )
     fee_stage: Mapped[str] = mapped_column(String(100), nullable=False)
+    fee_item_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     fee_item: Mapped[str] = mapped_column(String(255), nullable=False)
+    billing_basis: Mapped[str | None] = mapped_column(Text, nullable=True)
     currency: Mapped[str] = mapped_column(String(20), nullable=False)
     official_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0, nullable=False)
     foreign_agent_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0, nullable=False)

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 
 from app.models.pricing_rule import PricingRule
+from app.repositories.fee_items import FeeItemDefinitionRepository
 from app.repositories.pricing_rules import PricingRuleRepository
 from app.schemas.pricing_rule import PricingRuleCreate
 
@@ -14,9 +15,16 @@ class PricingRuleService:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.rules = PricingRuleRepository(db)
+        self.fee_items = FeeItemDefinitionRepository(db)
 
     def create_rule(self, payload: PricingRuleCreate) -> PricingRule:
-        rule = PricingRule(**payload.model_dump())
+        data = payload.model_dump()
+        if data.get("fee_item_code"):
+            fee_item = self.fee_items.get_by_code(str(data["fee_item_code"]))
+            if fee_item is not None:
+                data["fee_item"] = fee_item.fee_item_name
+                data["fee_stage"] = fee_item.fee_stage
+        rule = PricingRule(**data)
         self.rules.add(rule)
         self.db.commit()
         self.db.refresh(rule)
@@ -116,6 +124,8 @@ class PricingRuleService:
             "费用项目": "fee_item",
             "项目": "fee_item",
             "fee_item": "fee_item",
+            "费用项编码": "fee_item_code",
+            "fee_item_code": "fee_item_code",
             "币种": "currency",
             "currency": "currency",
             "官费公式": "official_fee_formula",
@@ -151,6 +161,11 @@ class PricingRuleService:
             normalized["effective_date"] = self._parse_import_date(
                 normalized["effective_date"]
             )
+        if normalized.get("fee_item_code") and not normalized.get("fee_item"):
+            fee_item = self.fee_items.get_by_code(str(normalized["fee_item_code"]))
+            if fee_item is not None:
+                normalized["fee_item"] = fee_item.fee_item_name
+                normalized["fee_stage"] = fee_item.fee_stage
         normalized.setdefault("invoice_tax_policy", "tax_included")
         normalized.setdefault("status", "active")
         return normalized
@@ -174,11 +189,10 @@ class PricingRuleService:
             "patent_type",
             "filing_route",
             "fee_stage",
-            "fee_item",
             "currency",
             "effective_date",
         }
-        return all(row.get(field) for field in required_fields)
+        return all(row.get(field) for field in required_fields) and bool(row.get("fee_item") or row.get("fee_item_code"))
 
     @staticmethod
     def _parse_import_date(value: object) -> date:
