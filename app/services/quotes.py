@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.models.quote import Quote, QuoteFeeItem, QuoteInput
 from app.repositories.exchange_rates import ExchangeRateRepository
+from app.repositories.price_details import PriceDetailRepository
 from app.repositories.pricing_rules import PricingRuleRepository
 from app.repositories.quotes import QuoteFeeItemRepository, QuoteRepository
 from app.schemas.quote import QuoteCreate
@@ -33,6 +34,7 @@ class QuoteService:
         self.quotes = QuoteRepository(db)
         self.fee_items = QuoteFeeItemRepository(db)
         self.pricing_rules = PricingRuleRepository(db)
+        self.price_details = PriceDetailRepository(db)
         self.exchange_rates = ExchangeRateRepository(db)
         self.design_pricing = DesignPricingConfigService(db)
 
@@ -128,6 +130,7 @@ class QuoteService:
             country_context = {
                 **context,
                 "country_region": country_region,
+                "entity_type": entity_type,
             }
             design_item = self._calculate_design_config_item(
                 quote=quote,
@@ -137,6 +140,19 @@ class QuoteService:
             if design_item is not None:
                 total_cny += design_item.subtotal_cny
                 items.append(design_item)
+                continue
+
+            price_detail_items = self._calculate_price_detail_items(
+                quote=quote,
+                country_region=country_region,
+                patent_type=quote.patent_type,
+                filing_route=quote.filing_route,
+                entity_type=str(entity_type) if entity_type is not None else None,
+                context=country_context,
+            )
+            if price_detail_items:
+                total_cny += sum((item.subtotal_cny for item in price_detail_items), Decimal("0.00"))
+                items.extend(price_detail_items)
                 continue
 
             rules = self.pricing_rules.find_active_rules(
@@ -152,9 +168,11 @@ class QuoteService:
                 try:
                     if not evaluator.evaluate_condition(rule.condition_expression):
                         continue
-                    official_fee = money(evaluator.evaluate_decimal(rule.official_fee_formula))
-                    foreign_agent_fee = money(evaluator.evaluate_decimal(rule.foreign_agent_fee_formula))
-                    local_agent_fee_cny = money(evaluator.evaluate_decimal(rule.local_agent_fee_formula))
+                    official_fee, foreign_agent_fee, local_agent_fee_cny = self._evaluate_rule_amounts(
+                        rule,
+                        evaluator,
+                        quote.quote_date,
+                    )
                 except FormulaError as exc:
                     raise ValueError(f"费用规则 {rule.id}（{rule.fee_item}）计算失败：{exc}") from exc
 
@@ -303,6 +321,162 @@ class QuoteService:
             remark=remark,
         )
 
+    def _calculate_price_detail_items(
+        self,
+        *,
+        quote: Quote,
+        country_region: str,
+        patent_type: str,
+        filing_route: str,
+        entity_type: str | None,
+        context: dict[str, object],
+    ) -> list[QuoteFeeItem]:
+        details = self.price_details.find_active_details(
+            country_region=country_region,
+            patent_type=patent_type,
+            filing_route=filing_route,
+            entity_type=entity_type,
+            quote_date=quote.quote_date,
+        )
+        if not details:
+            return []
+
+        evaluator = SafeFormulaEvaluator(context)
+        groups: dict[tuple[str, str, str | None], dict[str, object]] = {}
+        for detail in details:
+            try:
+                if not evaluator.evaluate_condition(detail.condition_expression):
+                    continue
+                amount = money(evaluator.evaluate_decimal(detail.amount_formula))
+            except FormulaError as exc:
+                raise ValueError(f"底层价格 {detail.id}（{detail.display_category}）计算失败：{exc}") from exc
+
+            key = (detail.fee_stage, detail.display_category, detail.display_remark)
+            group = groups.setdefault(
+                key,
+                {
+                    "fee_stage": detail.fee_stage,
+                    "display_category": detail.display_category,
+                    "display_remark": detail.display_remark,
+                    "currency": None,
+                    "official_fee": Decimal("0.00"),
+                    "foreign_agent_fee": Decimal("0.00"),
+                    "local_agent_fee_cny": Decimal("0.00"),
+                    "foreign_fee_cny": Decimal("0.00"),
+                    "taxable_cny": Decimal("0.00"),
+                    "display_order": detail.display_order,
+                },
+            )
+            group["display_order"] = min(int(group["display_order"]), detail.display_order)
+
+            amount_cny = self._amount_to_cny(detail.currency, amount, quote.quote_date)
+            if detail.fee_type == "local_agent_fee":
+                group["local_agent_fee_cny"] = money(Decimal(group["local_agent_fee_cny"]) + amount_cny)
+            elif detail.fee_type == "official_fee":
+                self._set_group_currency(group, detail.currency)
+                group["official_fee"] = money(Decimal(group["official_fee"]) + amount)
+                group["foreign_fee_cny"] = money(Decimal(group["foreign_fee_cny"]) + amount_cny)
+            elif detail.fee_type == "foreign_agent_fee":
+                self._set_group_currency(group, detail.currency)
+                group["foreign_agent_fee"] = money(Decimal(group["foreign_agent_fee"]) + amount)
+                group["foreign_fee_cny"] = money(Decimal(group["foreign_fee_cny"]) + amount_cny)
+
+            if not detail.is_tax_included:
+                group["taxable_cny"] = money(Decimal(group["taxable_cny"]) + amount_cny)
+
+        items: list[QuoteFeeItem] = []
+        for group in sorted(
+            groups.values(),
+            key=lambda item: (item["fee_stage"], item["display_order"], item["display_category"]),
+        ):
+            tax_cny = self._calculate_detail_tax(
+                quote=quote,
+                taxable_cny=Decimal(group["taxable_cny"]),
+            )
+            subtotal_cny = money(
+                Decimal(group["foreign_fee_cny"])
+                + Decimal(group["local_agent_fee_cny"])
+                + tax_cny
+            )
+            items.append(
+                QuoteFeeItem(
+                    quote_id=quote.id,
+                    pricing_rule_id=None,
+                    fee_stage=str(group["fee_stage"]),
+                    fee_item_code=None,
+                    fee_item=str(group["display_category"]),
+                    billing_basis=None,
+                    currency=str(group["currency"] or "CNY"),
+                    official_fee=Decimal(group["official_fee"]),
+                    foreign_agent_fee=Decimal(group["foreign_agent_fee"]),
+                    local_agent_fee_cny=Decimal(group["local_agent_fee_cny"]),
+                    tax_cny=tax_cny,
+                    subtotal_cny=subtotal_cny,
+                    remark=group["display_remark"],
+                )
+            )
+        return items
+
+    def _amount_to_cny(self, currency: str, amount: Decimal, quote_date) -> Decimal:
+        return money(amount * self._get_exchange_rate(currency, quote_date))
+
+    @staticmethod
+    def _set_group_currency(group: dict[str, object], currency: str) -> None:
+        normalized = currency.upper()
+        if normalized in CNY_CURRENCIES:
+            return
+        current = group.get("currency")
+        if current is None:
+            group["currency"] = normalized
+            return
+        if current != normalized:
+            raise ValueError("同一展示分类下官费和外所代理费暂不支持混用多个外币币种")
+
+    @staticmethod
+    def _calculate_detail_tax(*, quote: Quote, taxable_cny: Decimal) -> Decimal:
+        if not quote.requires_china_invoice:
+            return Decimal("0.00")
+        return money(taxable_cny * Decimal(str(quote.invoice_tax_rate)))
+
+    @staticmethod
+    def _evaluate_rule_amounts(rule, evaluator: SafeFormulaEvaluator, quote_date) -> tuple[Decimal, Decimal, Decimal]:
+        active_components = [
+            component
+            for component in rule.components
+            if (component.component_definition is None or component.component_definition.is_enabled)
+            and component.status in {"enabled", "active"}
+            and component.effective_date <= quote_date
+            and (component.expiry_date is None or component.expiry_date >= quote_date)
+        ]
+        if not active_components:
+            return (
+                money(evaluator.evaluate_decimal(rule.official_fee_formula)),
+                money(evaluator.evaluate_decimal(rule.foreign_agent_fee_formula)),
+                money(evaluator.evaluate_decimal(rule.local_agent_fee_formula)),
+            )
+
+        amounts = {
+            "official_fee": Decimal("0.00"),
+            "foreign_agent_fee": Decimal("0.00"),
+            "local_agent_fee": Decimal("0.00"),
+        }
+        for component in active_components:
+            if not evaluator.evaluate_condition(component.condition_expression):
+                continue
+            if component.component_definition is None:
+                raise FormulaError(f"缺少费用组成定义：{component.component_code}")
+            category = component.component_type
+            if category not in amounts:
+                raise FormulaError(f"未知费用小项类型：{category}")
+            amount = money(evaluator.evaluate_decimal(component.amount_formula))
+            amounts[category] += amount
+
+        return (
+            money(amounts["official_fee"]),
+            money(amounts["foreign_agent_fee"]),
+            money(amounts["local_agent_fee"]),
+        )
+
     @staticmethod
     def _design_count(input_map: dict[str, str | None]) -> int:
         for field_key in ("design_count", "design_items"):
@@ -320,7 +494,7 @@ class QuoteService:
         definition = rule.fee_item_definition
         if definition is None:
             return rule.fee_item
-        return definition.display_name_template or definition.fee_item_name
+        return definition.fee_item_name
 
     def _render_billing_basis(self, rule, context: dict[str, object]) -> str | None:
         definition = rule.fee_item_definition

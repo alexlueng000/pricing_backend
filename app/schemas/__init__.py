@@ -6,6 +6,7 @@ from app.schemas.design_pricing import (
 )
 from app.schemas.exchange_rate import ExchangeRateCreate, ExchangeRateRead
 from app.schemas.fee_item import FeeItemDefinitionCreate, FeeItemDefinitionRead
+from app.schemas.price_detail import PriceDetailCreate, PriceDetailRead
 from app.schemas.pricing_rule import (
     PricingRuleCreate,
     PricingRuleImportResponse,
@@ -30,6 +31,8 @@ __all__ = [
     "ExchangeRateRead",
     "FeeItemDefinitionCreate",
     "FeeItemDefinitionRead",
+    "PriceDetailCreate",
+    "PriceDetailRead",
     "LoginResponse",
     "PricingRuleCreate",
     "PricingRuleImportResponse",

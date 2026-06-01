@@ -3,7 +3,7 @@ from datetime import date
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.pricing_rule import PricingRule
+from app.models.pricing_rule import PricingRule, PricingRuleComponent
 from app.repositories.base import BaseRepository
 
 
@@ -22,7 +22,10 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
     ) -> list[PricingRule]:
         stmt = (
             select(PricingRule)
-            .options(selectinload(PricingRule.fee_item_definition))
+            .options(
+                selectinload(PricingRule.fee_item_definition),
+                selectinload(PricingRule.components).selectinload(PricingRuleComponent.component_definition),
+            )
             .where(
                 PricingRule.country_region == country_region,
                 PricingRule.patent_type == patent_type,
@@ -54,7 +57,10 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
     ) -> list[PricingRule]:
         stmt = (
             select(PricingRule)
-            .options(selectinload(PricingRule.fee_item_definition))
+            .options(
+                selectinload(PricingRule.fee_item_definition),
+                selectinload(PricingRule.components).selectinload(PricingRuleComponent.component_definition),
+            )
             .where(PricingRule.status == status)
         )
         if country_region:
@@ -74,3 +80,57 @@ class PricingRuleRepository(BaseRepository[PricingRule]):
         return list(
             self.db.scalars(stmt)
         )
+
+class PricingRuleComponentRepository(BaseRepository[PricingRuleComponent]):
+    def __init__(self, db: Session) -> None:
+        super().__init__(db, PricingRuleComponent)
+
+    def list_components(
+        self,
+        *,
+        rule_id: int | None = None,
+        component_code: str | None = None,
+        status: str | None = None,
+    ) -> list[PricingRuleComponent]:
+        stmt = select(PricingRuleComponent).options(
+            selectinload(PricingRuleComponent.pricing_rule),
+            selectinload(PricingRuleComponent.component_definition),
+        )
+        if rule_id is not None:
+            stmt = stmt.where(PricingRuleComponent.rule_id == rule_id)
+        if component_code:
+            stmt = stmt.where(PricingRuleComponent.component_code == component_code)
+        if status:
+            stmt = stmt.where(PricingRuleComponent.status == status)
+        stmt = stmt.order_by(
+            PricingRuleComponent.rule_id,
+            PricingRuleComponent.component_code,
+            PricingRuleComponent.effective_date.desc(),
+            PricingRuleComponent.id.desc(),
+        )
+        return list(self.db.scalars(stmt))
+
+    def has_overlapping_active_period(self, component: PricingRuleComponent) -> bool:
+        if component.status not in {"enabled", "active"}:
+            return False
+        stmt = select(PricingRuleComponent).where(
+            PricingRuleComponent.rule_id == component.rule_id,
+            PricingRuleComponent.component_code == component.component_code,
+            PricingRuleComponent.status.in_(("enabled", "active")),
+            PricingRuleComponent.id != (component.id or 0),
+            PricingRuleComponent.effective_date <= (component.expiry_date or date.max),
+            or_(
+                PricingRuleComponent.expiry_date.is_(None),
+                PricingRuleComponent.expiry_date >= component.effective_date,
+            ),
+        )
+        return self.db.scalar(stmt) is not None
+
+    def has_same_effective_date(self, component: PricingRuleComponent) -> bool:
+        stmt = select(PricingRuleComponent).where(
+            PricingRuleComponent.rule_id == component.rule_id,
+            PricingRuleComponent.component_code == component.component_code,
+            PricingRuleComponent.effective_date == component.effective_date,
+            PricingRuleComponent.id != (component.id or 0),
+        )
+        return self.db.scalar(stmt) is not None

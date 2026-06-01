@@ -1,7 +1,7 @@
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.fee_item import FeeItemDefinition
+from app.models.fee_item import FeeComponentDefinition, FeeItemDefinition
 from app.repositories.base import BaseRepository
 
 
@@ -36,5 +36,43 @@ class FeeItemDefinitionRepository(BaseRepository[FeeItemDefinition]):
             FeeItemDefinition.fee_stage,
             FeeItemDefinition.display_order,
             FeeItemDefinition.id,
+        )
+        return list(self.db.scalars(stmt))
+
+
+class FeeComponentDefinitionRepository(BaseRepository[FeeComponentDefinition]):
+    def __init__(self, db: Session) -> None:
+        super().__init__(db, FeeComponentDefinition)
+
+    def get_by_code(self, component_code: str) -> FeeComponentDefinition | None:
+        return self.db.scalar(
+            select(FeeComponentDefinition).where(
+                FeeComponentDefinition.component_code == component_code,
+            )
+        )
+
+    def list_components(
+        self,
+        *,
+        component_type: str | None = None,
+        query: str | None = None,
+        is_enabled: bool | None = None,
+    ) -> list[FeeComponentDefinition]:
+        stmt = select(FeeComponentDefinition)
+        if component_type:
+            stmt = stmt.where(FeeComponentDefinition.component_type == component_type)
+        if query:
+            stmt = stmt.where(
+                or_(
+                    FeeComponentDefinition.component_code.like(f"%{query}%"),
+                    FeeComponentDefinition.component_name.like(f"%{query}%"),
+                )
+            )
+        if is_enabled is not None:
+            stmt = stmt.where(FeeComponentDefinition.is_enabled == is_enabled)
+        stmt = stmt.order_by(
+            FeeComponentDefinition.component_type,
+            FeeComponentDefinition.display_order,
+            FeeComponentDefinition.id,
         )
         return list(self.db.scalars(stmt))

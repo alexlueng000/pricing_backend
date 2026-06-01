@@ -1,8 +1,33 @@
 from datetime import date
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.common import TimestampSchema
+
+
+class PricingRuleComponentBase(BaseModel):
+    rule_id: int
+    component_code: str
+    component_type: str
+    currency: str
+    amount_formula: str | None = None
+    condition_expression: str | None = None
+    effective_date: date
+    expiry_date: date | None = None
+    status: str = "enabled"
+    source_reference: str | None = None
+    source_attachment: str | None = None
+    change_reason: str | None = None
+    created_by: int | None = None
+    updated_by: int | None = None
+
+
+class PricingRuleComponentCreate(PricingRuleComponentBase):
+    pass
+
+
+class PricingRuleComponentRead(PricingRuleComponentBase, TimestampSchema):
+    id: int
 
 
 class PricingRuleBase(BaseModel):
@@ -31,6 +56,7 @@ class PricingRuleCreate(PricingRuleBase):
 
 class PricingRuleRead(PricingRuleBase, TimestampSchema):
     id: int
+    components: list[PricingRuleComponentRead] = Field(default_factory=list)
 
 
 class PricingRuleImportResponse(BaseModel):

@@ -5,7 +5,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.models import DesignPricingConfig, DesignPricingTier, ExchangeRate, FeeItemDefinition, PricingRule, Quote, QuoteInput
+from app.models import (
+    DesignPricingConfig,
+    DesignPricingTier,
+    ExchangeRate,
+    FeeComponentDefinition,
+    FeeItemDefinition,
+    PricingRule,
+    PricingRuleComponent,
+    Quote,
+    QuoteInput,
+)
 from app.schemas.quote import QuoteCreate, QuoteInputCreate
 from app.services.quotes import QuoteService
 
@@ -524,7 +534,6 @@ def test_fee_item_definition_controls_display_name_and_billing_basis():
                 business_type="外观设计",
                 fee_stage="申请阶段",
                 billing_basis_type="drawing_count",
-                display_name_template="外观附图处理费",
                 billing_basis_template="附图数量：{drawing_count}张",
                 display_order=100,
                 is_enabled=True,
@@ -567,6 +576,150 @@ def test_fee_item_definition_controls_display_name_and_billing_basis():
     assert calculated is not None
     assert calculated.fee_items[0].fee_item == "外观附图处理费"
     assert calculated.fee_items[0].billing_basis == "附图数量：8张"
+
+
+def test_pricing_rule_components_drive_fee_amounts_when_present():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        quote = Quote(
+            id=1,
+            quote_no="Q20260530000011",
+            consultant_id=1,
+            customer_name="组成费用客户",
+            status="draft",
+            quote_date=date(2026, 5, 30),
+            valid_until=date(2026, 6, 14),
+            country_region="美国",
+            patent_type="发明",
+            filing_route="巴黎公约",
+            total_cny=Decimal("0.00"),
+            is_estimate=True,
+            requires_china_invoice=True,
+            invoice_tax_rate=Decimal("0.0672"),
+        )
+        quote.inputs = [
+            QuoteInput(id=1, field_key="claims_count", field_label="权利要求项数", field_value="24"),
+        ]
+        db.add(quote)
+        db.add(
+            FeeItemDefinition(
+                id=1,
+                fee_item_code="US_INVENTION_FILING",
+                fee_item_name="美国发明申请费",
+                business_type="发明",
+                fee_stage="申请阶段",
+                billing_basis_type="claim_count",
+                billing_basis_template="权利要求：{claims_count}项",
+                display_order=100,
+                is_enabled=True,
+            )
+        )
+        db.add_all(
+            [
+                FeeComponentDefinition(
+                    id=1,
+                    component_code="US_OFFICIAL_BASIC",
+                    component_name="官费基础费",
+                    component_type="official_fee",
+                    default_currency="USD",
+                    display_order=100,
+                    is_enabled=True,
+                ),
+                FeeComponentDefinition(
+                    id=2,
+                    component_code="US_FOREIGN_AGENT_CLAIMS",
+                    component_name="外代超项费",
+                    component_type="foreign_agent_fee",
+                    default_currency="USD",
+                    display_order=200,
+                    is_enabled=True,
+                ),
+                FeeComponentDefinition(
+                    id=3,
+                    component_code="US_LOCAL_AGENT",
+                    component_name="本所代理费",
+                    component_type="local_agent_fee",
+                    default_currency="CNY",
+                    display_order=300,
+                    is_enabled=True,
+                ),
+            ]
+        )
+        rule = PricingRule(
+            id=1,
+            country_region="美国",
+            patent_type="发明",
+            filing_route="巴黎公约",
+            entity_type=None,
+            fee_stage="申请阶段",
+            fee_item_code="US_INVENTION_FILING",
+            fee_item="历史申请费",
+            currency="USD",
+            official_fee_formula="999999",
+            foreign_agent_fee_formula="999999",
+            local_agent_fee_formula="999999",
+            invoice_tax_policy="add_tax_if_invoice",
+            effective_date=date(2026, 1, 1),
+            status="active",
+        )
+        rule.components = [
+            PricingRuleComponent(
+                component_code="US_OFFICIAL_BASIC",
+                component_type="official_fee",
+                currency="USD",
+                amount_formula="320",
+                effective_date=date(2026, 1, 1),
+                status="active",
+                source_reference="USPTO",
+                change_reason="初始化",
+            ),
+            PricingRuleComponent(
+                component_code="US_FOREIGN_AGENT_CLAIMS",
+                component_type="foreign_agent_fee",
+                currency="USD",
+                amount_formula="1200 + max(claims_count - 20, 0) * 80",
+                effective_date=date(2026, 1, 1),
+                status="active",
+                source_reference="Agent quote",
+                change_reason="初始化",
+            ),
+            PricingRuleComponent(
+                component_code="US_LOCAL_AGENT",
+                component_type="local_agent_fee",
+                currency="CNY",
+                amount_formula="5000",
+                effective_date=date(2026, 1, 1),
+                status="active",
+                source_reference="Internal price",
+                change_reason="初始化",
+            ),
+        ]
+        db.add(rule)
+        db.add(
+            ExchangeRate(
+                id=1,
+                rate_date=date(2026, 5, 30),
+                currency="USD",
+                bank_rate=Decimal("7.000000"),
+                buffer_type="absolute",
+                buffer_value=Decimal("0.000000"),
+                final_rate=Decimal("7.000000"),
+                source="BOC",
+            )
+        )
+        db.commit()
+
+        calculated = QuoteService(db).calculate_quote(1)
+
+    assert calculated is not None
+    assert calculated.fee_items[0].fee_item_code == "US_INVENTION_FILING"
+    assert calculated.fee_items[0].official_fee == Decimal("320.00")
+    assert calculated.fee_items[0].foreign_agent_fee == Decimal("1520.00")
+    assert calculated.fee_items[0].local_agent_fee_cny == Decimal("5000.00")
+    assert calculated.fee_items[0].tax_cny == Decimal("865.54")
+    assert calculated.fee_items[0].subtotal_cny == Decimal("18745.54")
 
 
 def test_design_pricing_config_multiplies_when_multiple_designs_not_allowed():
