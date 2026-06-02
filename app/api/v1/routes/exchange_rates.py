@@ -3,7 +3,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_admin
+from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.exchange_rate import ExchangeRateCreate, ExchangeRateRead
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/exchange-rates", tags=["exchange-rates"])
 
 @router.get("", response_model=list[ExchangeRateRead])
 def list_exchange_rates(
-    _: User = Depends(require_admin),
+    _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     currency: str | None = Query(default=None),
     date_from: date | None = Query(default=None),

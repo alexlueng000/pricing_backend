@@ -1,10 +1,13 @@
+import json
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.quote import Quote, QuoteFeeItem, QuoteInput
+from app.models.wipo import WipoBaseEntity, WipoDataSource
 from app.repositories.exchange_rates import ExchangeRateRepository
 from app.repositories.price_details import PriceDetailRepository
 from app.repositories.pricing_rules import PricingRuleRepository
@@ -60,6 +63,8 @@ class QuoteService:
             special_tax_approved_by=payload.special_tax_approved_by,
             special_tax_approved_at=payload.special_tax_approved_at,
             special_tax_remark=payload.special_tax_remark,
+            base_data_version_refs=self._current_base_data_version_refs(),
+            base_data_snapshot=self._base_data_snapshot_for_quote(payload.country_region),
         )
         inputs = self._normalize_inputs_for_quote(payload)
         quote.inputs = [
@@ -524,6 +529,77 @@ class QuoteService:
         ]
         return regions or [country_region]
 
+    def _current_base_data_version_refs(self) -> str:
+        sources = list(
+            self.db.scalars(
+                select(WipoDataSource)
+                .where(WipoDataSource.is_active.is_(True))
+                .order_by(WipoDataSource.source_code)
+            )
+        )
+        refs = [
+            {
+                "source_code": source.source_code,
+                "source_name": source.source_name,
+                "source_url": source.source_url or source.official_url,
+                "current_version": source.current_version,
+                "current_version_id": source.current_version_id,
+                "source_status_date": source.source_status_date.isoformat() if source.source_status_date else None,
+                "last_published_at": source.last_published_at.isoformat() if source.last_published_at else None,
+            }
+            for source in sources
+        ]
+        return json.dumps(refs, ensure_ascii=False)
+
+    def _base_data_snapshot_for_quote(self, country_region: str) -> str:
+        rows = []
+        for country in self._split_country_regions(country_region):
+            entity = self._find_base_entity_for_country(country)
+            if entity is None:
+                rows.append(
+                    {
+                        "input_country_region": country,
+                        "matched": False,
+                        "note": "保存报价时未匹配到已发布国家基础数据；历史记录保留该缺口。",
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "input_country_region": country,
+                    "matched": True,
+                    "code": entity.code,
+                    "name_zh": entity.name_zh,
+                    "name_en": entity.name_en,
+                    "data_type": entity.data_type,
+                    "is_pct_member": entity.is_pct_member,
+                    "is_paris_member": entity.is_paris_member,
+                    "pct_entry_deadline_chapter_1": entity.pct_entry_deadline_chapter_1,
+                    "source_version_id": entity.source_version_id,
+                    "note": entity.note,
+                    "snapshot_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        return json.dumps(rows, ensure_ascii=False)
+
+    def _find_base_entity_for_country(self, country_region: str) -> WipoBaseEntity | None:
+        candidates = base_entity_code_candidates(country_region)
+        if candidates:
+            entity = self.db.scalar(
+                select(WipoBaseEntity)
+                .where(WipoBaseEntity.code.in_(candidates), WipoBaseEntity.is_active.is_(True))
+                .order_by(WipoBaseEntity.code)
+            )
+            if entity is not None:
+                return entity
+        return self.db.scalar(
+            select(WipoBaseEntity)
+            .where(
+                WipoBaseEntity.name_zh == country_region,
+                WipoBaseEntity.is_active.is_(True),
+            )
+        )
+
     @staticmethod
     def _get_applicability_remark(country_region: str, patent_type: str) -> str | None:
         return INAPPLICABLE_PATENT_TYPES.get((country_region, patent_type))
@@ -545,3 +621,25 @@ class QuoteService:
     def _generate_quote_no() -> str:
         now = datetime.now(timezone.utc)
         return f"Q{now:%Y%m%d%H%M%S%f}"
+
+
+def base_entity_code_candidates(country_region: str) -> list[str]:
+    normalized = country_region.strip().upper()
+    aliases = {
+        "美国": ["US"],
+        "US": ["US"],
+        "USA": ["US"],
+        "EPO": ["EP"],
+        "欧洲": ["EP"],
+        "欧洲专利局": ["EP"],
+        "EP": ["EP"],
+        "EUIPO": ["EM"],
+        "欧盟外观": ["EM"],
+        "欧盟知识产权局": ["EM"],
+        "EM": ["EM"],
+        "日本": ["JP"],
+        "JP": ["JP"],
+        "韩国": ["KR"],
+        "KR": ["KR"],
+    }
+    return aliases.get(country_region.strip(), aliases.get(normalized, [normalized] if re.fullmatch(r"[A-Z]{2}", normalized) else []))

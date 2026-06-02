@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from decimal import Decimal
 
@@ -15,6 +16,8 @@ from app.models import (
     PricingRuleComponent,
     Quote,
     QuoteInput,
+    WipoBaseEntity,
+    WipoDataSource,
 )
 from app.schemas.quote import QuoteCreate, QuoteInputCreate
 from app.services.quotes import QuoteService
@@ -101,6 +104,72 @@ def test_calculate_quote_generates_fee_items_and_total():
     assert calculated.fee_items[0].local_agent_fee_cny == Decimal("5000.00")
     assert calculated.fee_items[0].tax_cny == Decimal("890.27")
     assert calculated.fee_items[0].subtotal_cny == Decimal("19138.27")
+
+
+def test_create_quote_freezes_current_base_data_snapshot():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        db.add(
+            WipoDataSource(
+                id=1,
+                source_code="wipo_pct_paris_wto_membership",
+                source_key="wipo_pct_paris_wto_membership",
+                source_name="WIPO PCT / Paris 成员资格",
+                official_url="https://www.wipo.int/zh/web/pct-system/paris_wto_pct",
+                source_url="https://www.wipo.int/zh/web/pct-system/paris_wto_pct",
+                current_version="V3",
+                check_status="published",
+                is_active=True,
+            )
+        )
+        entity = WipoBaseEntity(
+            code="US",
+            name_zh="美国",
+            name_en="United States of America",
+            data_type="country",
+            is_pct_member=True,
+            is_paris_member=True,
+            pct_entry_deadline_chapter_1=30,
+            source_version_id=None,
+            note="测试版本",
+            is_active=True,
+        )
+        db.add(entity)
+        db.commit()
+
+        quote = QuoteService(db).create_quote(
+            QuoteCreate(
+                customer_name="测试客户",
+                quote_date=date(2026, 6, 3),
+                country_region="美国",
+                patent_type="发明",
+                filing_route="巴黎公约",
+                is_estimate=True,
+                inputs=[
+                    QuoteInputCreate(field_key="countries", field_label="申请国家/地区/主管局", field_value="美国"),
+                ],
+            ),
+            consultant_id=1,
+        )
+        frozen_snapshot = quote.base_data_snapshot
+        frozen_refs = quote.base_data_version_refs
+
+        entity.is_pct_member = False
+        entity.pct_entry_deadline_chapter_1 = 31
+        db.commit()
+        db.refresh(quote)
+        persisted_snapshot = quote.base_data_snapshot
+
+    assert frozen_snapshot is not None
+    snapshot = json.loads(frozen_snapshot)
+    assert snapshot[0]["code"] == "US"
+    assert snapshot[0]["is_pct_member"] is True
+    assert snapshot[0]["pct_entry_deadline_chapter_1"] == 30
+    assert persisted_snapshot == frozen_snapshot
+    assert frozen_refs is not None
+    assert json.loads(frozen_refs)[0]["current_version"] == "V3"
 
 
 def test_calculate_quote_matches_rules_for_multiple_countries():

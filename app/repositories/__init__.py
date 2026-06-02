@@ -1,3 +1,4 @@
+from app.repositories.config import ConfigDictionaryRepository, CountryConfigRepository
 from app.repositories.design_pricing import DesignPricingConfigRepository
 from app.repositories.exchange_rates import ExchangeRateRepository
 from app.repositories.fee_items import FeeComponentDefinitionRepository, FeeItemDefinitionRepository
@@ -8,6 +9,8 @@ from app.repositories.users import RoleRepository, UserRepository
 
 __all__ = [
     "DesignPricingConfigRepository",
+    "ConfigDictionaryRepository",
+    "CountryConfigRepository",
     "ExchangeRateRepository",
     "FeeComponentDefinitionRepository",
     "FeeItemDefinitionRepository",

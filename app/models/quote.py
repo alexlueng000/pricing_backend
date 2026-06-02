@@ -55,6 +55,8 @@ class Quote(TimestampMixin, Base):
     special_tax_approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     special_tax_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     special_tax_remark: Mapped[str | None] = mapped_column(Text, nullable=True)
+    base_data_version_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    base_data_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     consultant: Mapped["User"] = relationship(
         back_populates="quotes",

@@ -64,6 +64,8 @@ class QuoteBase(BaseModel):
     special_tax_approved_by: int | None = None
     special_tax_approved_at: datetime | None = None
     special_tax_remark: str | None = None
+    base_data_version_refs: str | None = None
+    base_data_snapshot: str | None = None
 
 
 class QuoteCreate(QuoteBase):

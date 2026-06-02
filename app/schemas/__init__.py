@@ -1,4 +1,10 @@
 from app.schemas.auth import LoginResponse, Token
+from app.schemas.config import (
+    ConfigDictionaryCreate,
+    ConfigDictionaryRead,
+    CountryConfigCreate,
+    CountryConfigRead,
+)
 from app.schemas.design_pricing import (
     DesignPricingConfigCreate,
     DesignPricingConfigRead,
@@ -25,6 +31,10 @@ from app.schemas.user import RoleRead, UserAdminCreate, UserCreate, UserRead
 
 __all__ = [
     "ExchangeRateCreate",
+    "ConfigDictionaryCreate",
+    "ConfigDictionaryRead",
+    "CountryConfigCreate",
+    "CountryConfigRead",
     "DesignPricingConfigCreate",
     "DesignPricingConfigRead",
     "DesignPricingTierRead",
