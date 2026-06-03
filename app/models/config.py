@@ -35,6 +35,7 @@ class CountryConfig(TimestampMixin, Base):
     country_aliases: Mapped[str | None] = mapped_column(Text, nullable=True)
     supported_patent_types: Mapped[str | None] = mapped_column(Text, nullable=True)
     supported_filing_routes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supported_pct_entry_options: Mapped[str | None] = mapped_column(Text, nullable=True)
     supported_entity_types: Mapped[str | None] = mapped_column(Text, nullable=True)
     entity_type_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     default_entity_type: Mapped[str | None] = mapped_column(String(100), nullable=True)

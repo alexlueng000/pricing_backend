@@ -6,7 +6,15 @@ from app.models.price_detail import PriceDetail
 from app.repositories.price_details import PriceDetailRepository
 from app.schemas.price_detail import PriceDetailCreate
 
-FEE_TYPES = {"official_fee", "foreign_agent_fee", "local_agent_fee"}
+LEGACY_FEE_TYPES = {"official_fee", "foreign_agent_fee", "local_agent_fee"}
+STRUCTURED_FEE_TYPES = {
+    "target_official_fee",
+    "our_service_fee",
+    "associate_service_fee",
+    "third_party_disbursement",
+}
+FEE_TYPES = LEGACY_FEE_TYPES | STRUCTURED_FEE_TYPES
+DISPLAY_SECTIONS = {"main_table", "disbursement_section"}
 
 
 class PriceDetailService:
@@ -54,11 +62,14 @@ class PriceDetailService:
     def _normalize(data: dict[str, object]) -> dict[str, object]:
         fee_type = str(data.get("fee_type") or "").strip()
         if fee_type not in FEE_TYPES:
-            raise ValueError("费用类型只能为 official_fee / foreign_agent_fee / local_agent_fee")
+            raise ValueError("费用类型不合法")
         if not str(data.get("display_category") or "").strip():
             raise ValueError("展示分类不能为空")
         if not str(data.get("amount_formula") or "").strip():
             raise ValueError("金额不能为空")
+        display_section = str(data.get("display_section") or "").strip()
+        if display_section and display_section not in DISPLAY_SECTIONS:
+            raise ValueError("展示分区只能为 main_table / disbursement_section")
         if data.get("expiry_date") and data["expiry_date"] < data["effective_date"]:
             raise ValueError("失效日期不得早于生效日期")
 
@@ -66,5 +77,13 @@ class PriceDetailService:
             if isinstance(value, str):
                 data[key] = value.strip() or None
         data["fee_type"] = fee_type
+        if not data.get("display_section"):
+            data["display_section"] = default_display_section(fee_type)
         data["status"] = data.get("status") or "active"
         return data
+
+
+def default_display_section(fee_type: str) -> str:
+    if fee_type == "third_party_disbursement":
+        return "disbursement_section"
+    return "main_table"

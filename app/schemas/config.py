@@ -26,6 +26,7 @@ class CountryConfigBase(BaseModel):
     country_aliases: str | None = None
     supported_patent_types: str | None = None
     supported_filing_routes: str | None = None
+    supported_pct_entry_options: str | None = None
     supported_entity_types: str | None = None
     entity_type_enabled: bool = True
     default_entity_type: str | None = None

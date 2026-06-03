@@ -19,6 +19,19 @@ from app.services.design_pricing import DesignPricingConfigService
 
 QUOTE_STATUSES = {"draft", "generated", "sent_to_customer", "voided"}
 CNY_CURRENCIES = {"CNY", "RMB", "人民币"}
+FEE_TYPE_ALIASES = {
+    "official_fee": "target_official_fee",
+    "foreign_agent_fee": "associate_service_fee",
+    "local_agent_fee": "our_service_fee",
+}
+MAIN_DISPLAY_SECTION = "main_table"
+DISBURSEMENT_DISPLAY_SECTION = "disbursement_section"
+FEE_TYPE_DISPLAY_SECTIONS = {
+    "target_official_fee": MAIN_DISPLAY_SECTION,
+    "associate_service_fee": MAIN_DISPLAY_SECTION,
+    "our_service_fee": MAIN_DISPLAY_SECTION,
+    "third_party_disbursement": DISBURSEMENT_DISPLAY_SECTION,
+}
 DESIGN_EXAMINATION_CATEGORY_DEFAULT = "default_substantive"
 DESIGN_EXAMINATION_CATEGORY_VALUES = {
     "substantive_examination",
@@ -347,8 +360,13 @@ class QuoteService:
             return []
 
         evaluator = SafeFormulaEvaluator(context)
-        groups: dict[tuple[str, str, str | None], dict[str, object]] = {}
-        for detail in details:
+        selected_details = self._select_best_price_details(
+            details=details,
+            filing_route=filing_route,
+            entity_type=entity_type,
+        )
+        groups: dict[tuple[str, str, str | None, str], dict[str, object]] = {}
+        for detail in selected_details:
             try:
                 if not evaluator.evaluate_condition(detail.condition_expression):
                     continue
@@ -356,35 +374,58 @@ class QuoteService:
             except FormulaError as exc:
                 raise ValueError(f"底层价格 {detail.id}（{detail.display_category}）计算失败：{exc}") from exc
 
-            key = (detail.fee_stage, detail.display_category, detail.display_remark)
+            normalized_fee_type = self._normalize_fee_type(detail.fee_type)
+            display_section = detail.display_section or self._default_display_section(normalized_fee_type)
+            key = (detail.fee_stage, detail.display_category, detail.display_remark, display_section)
             group = groups.setdefault(
                 key,
                 {
                     "fee_stage": detail.fee_stage,
                     "display_category": detail.display_category,
                     "display_remark": detail.display_remark,
+                    "display_section": display_section,
+                    "fee_types": set(),
+                    "fee_sub_types": set(),
+                    "payee_types": set(),
+                    "payee_names": set(),
+                    "payee_countries": set(),
+                    "is_pass_through": None,
                     "currency": None,
                     "official_fee": Decimal("0.00"),
                     "foreign_agent_fee": Decimal("0.00"),
                     "local_agent_fee_cny": Decimal("0.00"),
+                    "disbursement_fee_cny": Decimal("0.00"),
                     "foreign_fee_cny": Decimal("0.00"),
                     "taxable_cny": Decimal("0.00"),
                     "display_order": detail.display_order,
                 },
             )
             group["display_order"] = min(int(group["display_order"]), detail.display_order)
+            group["fee_types"].add(normalized_fee_type)
+            if detail.fee_sub_type:
+                group["fee_sub_types"].add(detail.fee_sub_type)
+            if detail.payee_type:
+                group["payee_types"].add(detail.payee_type)
+            if detail.payee_name:
+                group["payee_names"].add(detail.payee_name)
+            if detail.payee_country:
+                group["payee_countries"].add(detail.payee_country)
+            if detail.is_pass_through is not None:
+                group["is_pass_through"] = detail.is_pass_through
 
             amount_cny = self._amount_to_cny(detail.currency, amount, quote.quote_date)
-            if detail.fee_type == "local_agent_fee":
+            if normalized_fee_type == "our_service_fee":
                 group["local_agent_fee_cny"] = money(Decimal(group["local_agent_fee_cny"]) + amount_cny)
-            elif detail.fee_type == "official_fee":
+            elif normalized_fee_type == "target_official_fee":
                 self._set_group_currency(group, detail.currency)
                 group["official_fee"] = money(Decimal(group["official_fee"]) + amount)
                 group["foreign_fee_cny"] = money(Decimal(group["foreign_fee_cny"]) + amount_cny)
-            elif detail.fee_type == "foreign_agent_fee":
+            elif normalized_fee_type == "associate_service_fee":
                 self._set_group_currency(group, detail.currency)
                 group["foreign_agent_fee"] = money(Decimal(group["foreign_agent_fee"]) + amount)
                 group["foreign_fee_cny"] = money(Decimal(group["foreign_fee_cny"]) + amount_cny)
+            elif normalized_fee_type == "third_party_disbursement":
+                group["disbursement_fee_cny"] = money(Decimal(group["disbursement_fee_cny"]) + amount_cny)
 
             if not detail.is_tax_included:
                 group["taxable_cny"] = money(Decimal(group["taxable_cny"]) + amount_cny)
@@ -401,6 +442,7 @@ class QuoteService:
             subtotal_cny = money(
                 Decimal(group["foreign_fee_cny"])
                 + Decimal(group["local_agent_fee_cny"])
+                + Decimal(group["disbursement_fee_cny"])
                 + tax_cny
             )
             items.append(
@@ -410,17 +452,88 @@ class QuoteService:
                     fee_stage=str(group["fee_stage"]),
                     fee_item_code=None,
                     fee_item=str(group["display_category"]),
+                    fee_type=self._single_or_none(group["fee_types"]),
+                    fee_sub_type=self._single_or_none(group["fee_sub_types"]),
+                    display_section=str(group["display_section"]),
+                    payee_type=self._single_or_none(group["payee_types"]),
+                    payee_name=self._single_or_none(group["payee_names"]),
+                    payee_country=self._single_or_none(group["payee_countries"]),
+                    is_pass_through=group["is_pass_through"],
                     billing_basis=None,
                     currency=str(group["currency"] or "CNY"),
                     official_fee=Decimal(group["official_fee"]),
                     foreign_agent_fee=Decimal(group["foreign_agent_fee"]),
                     local_agent_fee_cny=Decimal(group["local_agent_fee_cny"]),
+                    disbursement_fee_cny=Decimal(group["disbursement_fee_cny"]),
                     tax_cny=tax_cny,
                     subtotal_cny=subtotal_cny,
                     remark=group["display_remark"],
                 )
             )
         return items
+
+    @classmethod
+    def _select_best_price_details(
+        cls,
+        *,
+        details,
+        filing_route: str,
+        entity_type: str | None,
+    ):
+        selected = {}
+        for detail in details:
+            key = cls._price_detail_identity_key(detail)
+            priority = (
+                1 if detail.filing_route == filing_route else 0,
+                1 if entity_type is not None and detail.entity_type == entity_type else 0,
+            )
+            current = selected.get(key)
+            if current is None or priority > current[0] or (
+                priority == current[0] and detail.id > current[1].id
+            ):
+                selected[key] = (priority, detail)
+        return [item[1] for item in selected.values()]
+
+    @classmethod
+    def _price_detail_identity_key(cls, detail) -> tuple[object, ...]:
+        if detail.fee_group_id or detail.component_id:
+            return (
+                detail.country_region,
+                detail.patent_type,
+                detail.fee_stage,
+                detail.fee_group_id,
+                detail.component_id,
+                cls._normalize_fee_type(detail.fee_type),
+                detail.fee_sub_type,
+                detail.currency,
+                detail.condition_expression,
+            )
+        return (
+            detail.country_region,
+            detail.patent_type,
+            detail.fee_stage,
+            detail.display_category,
+            detail.display_remark,
+            cls._normalize_fee_type(detail.fee_type),
+            detail.currency,
+            detail.condition_expression,
+        )
+
+    @staticmethod
+    def _normalize_fee_type(fee_type: str) -> str:
+        return FEE_TYPE_ALIASES.get(fee_type, fee_type)
+
+    @staticmethod
+    def _default_display_section(fee_type: str) -> str:
+        return FEE_TYPE_DISPLAY_SECTIONS.get(fee_type, MAIN_DISPLAY_SECTION)
+
+    @staticmethod
+    def _single_or_none(values) -> str | None:
+        if not values:
+            return None
+        if len(values) == 1:
+            return next(iter(values))
+        return None
 
     def _amount_to_cny(self, currency: str, amount: Decimal, quote_date) -> Decimal:
         return money(amount * self._get_exchange_rate(currency, quote_date))

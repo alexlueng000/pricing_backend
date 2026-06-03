@@ -26,11 +26,19 @@ class QuoteFeeItemBase(BaseModel):
     fee_stage: str
     fee_item_code: str | None = None
     fee_item: str
+    fee_type: str | None = None
+    fee_sub_type: str | None = None
+    display_section: str | None = None
+    payee_type: str | None = None
+    payee_name: str | None = None
+    payee_country: str | None = None
+    is_pass_through: bool | None = None
     billing_basis: str | None = None
     currency: str
     official_fee: Decimal = Decimal("0.00")
     foreign_agent_fee: Decimal = Decimal("0.00")
     local_agent_fee_cny: Decimal = Decimal("0.00")
+    disbursement_fee_cny: Decimal = Decimal("0.00")
     tax_cny: Decimal = Decimal("0.00")
     subtotal_cny: Decimal = Decimal("0.00")
     remark: str | None = None

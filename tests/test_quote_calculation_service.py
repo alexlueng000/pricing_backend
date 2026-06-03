@@ -14,6 +14,7 @@ from app.models import (
     FeeItemDefinition,
     PricingRule,
     PricingRuleComponent,
+    PriceDetail,
     Quote,
     QuoteInput,
     WipoBaseEntity,
@@ -170,6 +171,143 @@ def test_create_quote_freezes_current_base_data_snapshot():
     assert persisted_snapshot == frozen_snapshot
     assert frozen_refs is not None
     assert json.loads(frozen_refs)[0]["current_version"] == "V3"
+
+
+def test_price_detail_specific_route_and_entity_win_over_common_items():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        quote = Quote(
+            id=1,
+            quote_no="Q20260603000001",
+            consultant_id=1,
+            customer_name="优先级客户",
+            status="draft",
+            quote_date=date(2026, 6, 3),
+            country_region="美国",
+            patent_type="发明",
+            filing_route="巴黎公约",
+            total_cny=Decimal("0.00"),
+            is_estimate=True,
+        )
+        quote.inputs = [
+            QuoteInput(id=1, field_key="entity_type", field_label="实体类型", field_value="大实体"),
+        ]
+        db.add(quote)
+        base = {
+            "country_region": "美国",
+            "patent_type": "发明",
+            "fee_group_id": "GROUP_A",
+            "fee_group_name": "费用大项目",
+            "component_id": "COMP_A",
+            "component_name": "费用明细项",
+            "fee_stage": "申请阶段",
+            "display_category": "结构费用",
+            "display_section": "main_table",
+            "fee_type": "our_service_fee",
+            "currency": "CNY",
+            "is_tax_included": True,
+            "effective_date": date(2026, 1, 1),
+            "status": "active",
+        }
+        db.add_all(
+            [
+                PriceDetail(id=1, filing_route=None, entity_type=None, amount_formula="100", **base),
+                PriceDetail(id=2, filing_route="巴黎公约", entity_type=None, amount_formula="200", **base),
+                PriceDetail(id=3, filing_route=None, entity_type="大实体", amount_formula="300", **base),
+                PriceDetail(id=4, filing_route="巴黎公约", entity_type="大实体", amount_formula="400", **base),
+            ]
+        )
+        db.commit()
+
+        calculated = QuoteService(db).calculate_quote(1)
+
+    assert calculated is not None
+    assert calculated.total_cny == Decimal("400.00")
+    assert len(calculated.fee_items) == 1
+    assert calculated.fee_items[0].local_agent_fee_cny == Decimal("400.00")
+
+
+def test_third_party_disbursement_keeps_its_fee_type_and_section():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        quote = Quote(
+            id=1,
+            quote_no="Q20260603000002",
+            consultant_id=1,
+            customer_name="代垫客户",
+            status="draft",
+            quote_date=date(2026, 6, 3),
+            country_region="美国",
+            patent_type="发明",
+            filing_route="巴黎公约",
+            total_cny=Decimal("0.00"),
+            is_estimate=True,
+        )
+        db.add(quote)
+        db.add_all(
+            [
+                PriceDetail(
+                    id=1,
+                    country_region="美国",
+                    patent_type="发明",
+                    filing_route=None,
+                    entity_type=None,
+                    fee_group_id="MAIN",
+                    fee_group_name="主费用",
+                    component_id="OUR_SERVICE",
+                    component_name="本所服务费",
+                    fee_stage="申请阶段",
+                    display_category="主费用",
+                    fee_type="our_service_fee",
+                    currency="CNY",
+                    amount_formula="500",
+                    is_tax_included=True,
+                    effective_date=date(2026, 1, 1),
+                    status="active",
+                ),
+                PriceDetail(
+                    id=2,
+                    country_region="美国",
+                    patent_type="发明",
+                    filing_route=None,
+                    entity_type=None,
+                    fee_group_id="DISB",
+                    fee_group_name="第三方代垫费用",
+                    component_id="PRIORITY_DOC",
+                    component_name="优先权文件副本官方费用",
+                    fee_stage="申请阶段",
+                    display_category="第三方代垫费用",
+                    fee_type="third_party_disbursement",
+                    fee_sub_type="priority_document",
+                    payee_type="origin_office",
+                    payee_name="来源国主管机关",
+                    payee_country="CN",
+                    is_pass_through=True,
+                    currency="CNY",
+                    amount_formula="120",
+                    is_tax_included=True,
+                    effective_date=date(2026, 1, 1),
+                    status="active",
+                ),
+            ]
+        )
+        db.commit()
+
+        calculated = QuoteService(db).calculate_quote(1)
+
+    assert calculated is not None
+    assert calculated.total_cny == Decimal("620.00")
+    disbursement_items = [
+        item for item in calculated.fee_items if item.display_section == "disbursement_section"
+    ]
+    assert len(disbursement_items) == 1
+    assert disbursement_items[0].fee_type == "third_party_disbursement"
+    assert disbursement_items[0].disbursement_fee_cny == Decimal("120.00")
+    assert disbursement_items[0].official_fee == Decimal("0.00")
 
 
 def test_calculate_quote_matches_rules_for_multiple_countries():

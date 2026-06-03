@@ -55,7 +55,7 @@ class PriceDetailRepository(BaseRepository[PriceDetail]):
             .where(
                 PriceDetail.country_region == country_region,
                 PriceDetail.patent_type == patent_type,
-                PriceDetail.filing_route == filing_route,
+                or_(PriceDetail.filing_route == filing_route, PriceDetail.filing_route.is_(None)),
                 PriceDetail.status == "active",
                 PriceDetail.effective_date <= quote_date,
                 or_(PriceDetail.expiry_date.is_(None), PriceDetail.expiry_date >= quote_date),
